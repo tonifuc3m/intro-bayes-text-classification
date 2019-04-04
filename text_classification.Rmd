@@ -1,0 +1,172 @@
+---
+title: "Text Classification Using Naive Bayes"
+output:
+  html_document:
+    df_print: paged
+---
+
+In this assignment I will classify real movie dialogs in two classes: whether they belong to an action movie or to another type of movie. The classifier chosen for this task is Naive Bayes. 
+
+The dataset used is the [Cornell Movie-Dialogs Corpus](https://www.cs.cornell.edu/~cristian/Cornell_Movie-Dialogs_Corpus.html). It cointains more than 300.000 utterances. Due to memory issues, I have used only a random portion of it. In order for this code to work it has to be in the default path in a file named movie_dialogs.csv. 
+
+```{r input, message=FALSE, results='hide'}
+packages_needed<-c("tm","quanteda", "dplyr", "caret","e1071", "wordcloud")
+#install.packages(packages_needed)
+lapply(packages_needed, require, character.only = TRUE)
+
+## Load data
+MyData <- read.csv(file="movie_dialogs.csv",
+                   header=TRUE, 
+                   sep=";",
+                   stringsAsFactors = FALSE)
+```
+
+### 1. Cleaning the dataset
+
+Since only a portion of the dataset will be used, I have decided to remove utterances with less than 5 words. 
+```{r rm_long_utt, results='hold'}
+indexes = rownames(data.frame(char_trim(MyData$text, "documents", min_ntoken=1)))
+idx_df = data.frame("data"=indexes)
+idx_df$data = as.character(idx_df$data)
+idx_df$data = substr(idx_df$data,5,nchar(idx_df$data))
+idx_df$data = as.numeric(idx_df$data)
+MyData_long = MyData[idx_df$data,]
+```
+
+As in other steps, we want to make sure that the proportion of action movies does not change substantially when we perform these operations. Then, we will check it:
+```{r prop1}
+print(paste0('Proportion of action movies in new dataset: ', 
+                   sum(MyData_long$action)/dim(MyData_long)[1]))
+
+print(paste0('Proportion of action movies in old dataset: ', 
+                   sum(MyData$action)/dim(MyData)[1]))
+
+```
+
+### 2. Subsampling the dataset
+
+We will now choose only a 20% of the remaining utterances, since the dataset is still to largo for R to handle it.
+```{r final_dataset}
+ActionData = MyData_long %>% sample_frac(.15) %>% select(action,text)
+
+print(paste0('Proportion of action movies in new dataset: ', 
+                   sum(ActionData$action)/dim(ActionData)[1]))
+
+print(paste0('Proportion of action movies in old dataset: ', 
+                   sum(MyData$action)/dim(MyData)[1]))
+
+```
+
+
+### 3. Creating the corpus
+Once we have the dataset ready, we will create a corpus variable, on which we can apply several functions for standardizing our text: lowercase the words, remove numbers, punctuation and stopwords and strip white space. 
+```{r create_corpus, warning=FALSE}
+options(warn=-1)
+corpus <- Corpus(VectorSource(ActionData$text))
+
+## Clean data
+clean_corpus <- tm_map(corpus, tolower)
+
+clean_corpus <- tm_map(clean_corpus, removeNumbers)
+clean_corpus <- tm_map(clean_corpus, removePunctuation)
+
+clean_corpus <- tm_map(clean_corpus, removeWords, stopwords("en"))
+clean_corpus <- tm_map(clean_corpus, stripWhitespace)
+options(warn=0)
+```
+
+### 4. Wordclouds
+
+We show now a wordcloud of the utterances of action and non-action films, to get an idea of the most frequently used words in the dialogs of both types of movies
+```{r word_clouds}
+options(warn=-1)
+# Get labels
+action_indices <- which(ActionData$action == 1)
+non_action_indices <- which(ActionData$action == 0)
+
+layout(matrix(c(1, 2), nrow=2), heights=c(1, 4))
+par(mar=rep(0, 4))
+plot.new()
+text(x=0.5, y=0.5, 'Action movies')
+wordcloud(clean_corpus[action_indices], min.freq=100, scale=c(3,.5), main = 'Action movies')
+
+layout(matrix(c(1, 2), nrow=2), heights=c(1, 4))
+par(mar=rep(0, 4))
+plot.new()
+text(x=0.5, y=0.5, 'Non-action movies')
+wordcloud(clean_corpus[non_action_indices], min.freq=100, scale=c(3,.5), main = 'Non-action movies')
+options(warn=0)
+```
+
+
+### 5. Train and test partitions
+
+Maintaining the class proportions
+```{r train_and_test}
+index <- createDataPartition(ActionData$action, p = 0.7, list = FALSE)
+
+ActionData_train <- ActionData[index,]
+ActionData_test <- ActionData[-index,]
+corpus_train <- clean_corpus[index]
+corpus_test <- clean_corpus[-index]
+```
+
+
+### 6. DocumentTermMatrix for ease of other computations
+```{r create_dtm}
+# Create term-document matrix (what for?)
+ActionData_dtm <- DocumentTermMatrix(clean_corpus)
+ActionData_dtm_train <- ActionData_dtm[index,]
+ActionData_dtm_test <- ActionData_dtm[-index,]
+
+```
+
+### 7. Filter out non-frequent words and use n-grams
+Since we are not using a method such as TF-iDF, we will remove words that barely appear in our dataset, since they will makek the model more computationally expensive and may introduce noise, since their presence is not significative. 
+
+Also, one of the disadvantages of NaiveBayes is its "naiveness". We will try to reduce it using ngrams (or 2 words in this case), despite this increases the number of features. 
+```{r dtm_filtering}
+# Only focus on words that appear more than x times
+n_times_words <- findFreqTerms(ActionData_dtm_train, 10)
+length(n_times_words)
+BigramTokenizer <-
+  function(x)
+    unlist(lapply(ngrams(words(x), c(2)), paste, collapse = " "), use.names = FALSE)
+ActionData_dtm_train <- DocumentTermMatrix(corpus_train,
+                                    control=list(dictionary = n_times_words,
+                                                 tokenize = BigramTokenizer))
+ActionData_dtm_test <- DocumentTermMatrix(corpus_test,
+                                   control=list(dictionary = n_times_words,
+                                                tokenize = BigramTokenizer))
+convert_count <- function(x){
+  y <- ifelse(x > 0, 1,0)
+  y <- factor(y, levels=c(0,1), labels=c("No", "Yes"))
+  y
+}
+
+# Get a 1 if the word is in the dialog, a 0 if not
+ActionData_dtm_train <- apply(ActionData_dtm_train, 2, convert_count)
+ActionData_dtm_test <- apply(ActionData_dtm_test, 2, convert_count)
+```
+
+
+### 8. Final model and predictions
+
+We finally have our dataset with the words that appear in each utterance. We will train a NaiveBayes classifier (with and without Laplace smoothing).
+```{r final_model}
+# Bayesian model and predictions
+classifier <- naiveBayes(ActionData_dtm_train, as.factor(ActionData_train$action))
+predictions <- predict(classifier, newdata=ActionData_dtm_test)
+table(predictions, ActionData_test$action)
+
+B.clas <- naiveBayes(ActionData_dtm_train, as.factor(ActionData_train$action),laplace = 1)
+B.preds <- predict(B.clas, newdata=ActionData_dtm_test)
+table(B.preds, ActionData_test$action)
+```
+
+
+Laplace smoothing has changed the ratio between True Positives and True Negatives. Without Laplace smoothing our classifier was less bad at detecting True Negatives, and with it the classifier is better at detecting True Positives. 
+
+The biggest drawback of our classifier is that, by default, it classifies almost all the new dialogs to the majority class (non-action). According to [some literature](https://web.stanford.edu/~hastie/ElemStatLearn//) I have been reading, Naive Bayes tends to classify the new instance in the majority class if everything else is equal, specially when there is a lot of noise. 
+
+Some improvements on that could be not removing the dialogs with few words, since many action dialogs include expressions such as "Fuck! or "Shit!". Also, changing the low-frequency filtering and the ngram function may help improve the predictions. Or using more complex scorings such as tf-idf and better performing classifiers. 
